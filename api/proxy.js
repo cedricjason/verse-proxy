@@ -1,9 +1,9 @@
 export default async function handler(req, res) {
   const { path = '33-gallery', ...rest } = req.query
   
-  // Build the Verse URL
   const params = new URLSearchParams({ iframe: 'true', ...rest })
   const verseUrl = `https://iframe.verse.works/${path}?${params}`
+  const verseOrigin = 'https://iframe.verse.works'
   
   try {
     const response = await fetch(verseUrl, {
@@ -17,13 +17,26 @@ export default async function handler(req, res) {
 
     let html = await response.text()
 
-    // Swap light class to dark on the html element
+    // Swap light to dark
     html = html.replace(
       /(<html[^>]*class="[^"]*)\blight\b([^"]*")/,
       '$1dark$2'
     )
 
-    // Forward relevant headers
+    // Rewrite absolute-path URLs to include verse origin
+    // Handles src="/_next/...", href="/_next/...", url(/_next/...)
+    html = html
+      .replace(/(src|href)="\//g, `$1="${verseOrigin}/`)
+      .replace(/(src|href)='\//g, `$1='${verseOrigin}/`)
+      .replace(/url\(\//g, `url(${verseOrigin}/`)
+      .replace(/sourceMappingURL=\//g, `sourceMappingURL=${verseOrigin}/`)
+
+    // Fix Next.js router base path if needed
+    html = html.replace(
+      /"assetPrefix":""/g,
+      `"assetPrefix":"${verseOrigin}"`
+    )
+
     res.setHeader('Content-Type', 'text/html; charset=utf-8')
     res.setHeader('Access-Control-Allow-Origin', '*')
     
