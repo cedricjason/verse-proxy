@@ -159,6 +159,11 @@ self.addEventListener('activate', () => {
     return pipeRaw(`${VERSE_ORIGIN}${rawUrl}`)
   }
 
+  // 6b. Static uploads (images, videos) served from verse.works directly
+  if (rawUrl.startsWith('/static/')) {
+    return pipeRaw(`${VERSE_API_ORIGIN}${rawUrl}`)
+  }
+
   // 7. Static file extensions
   const staticExt = /\.(woff2?|ttf|eot|otf|ico|png|jpe?g|gif|svg|webp|avif|mp4|webm|map)(\?|$)/i
   if (staticExt.test(rawUrl)) {
