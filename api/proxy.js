@@ -53,7 +53,6 @@ export default async function handler(req, res) {
     }
   }
 
-  // For POST/mutation requests (GraphQL) — forward body + method
   async function pipeRequest(url) {
     try {
       const fetchOpts = {
@@ -65,7 +64,6 @@ export default async function handler(req, res) {
         },
       }
       if (req.method !== 'GET' && req.method !== 'HEAD') {
-        // Read raw body
         const chunks = []
         for await (const chunk of req) chunks.push(chunk)
         fetchOpts.body = Buffer.concat(chunks)
@@ -97,6 +95,37 @@ export default async function handler(req, res) {
     return
   }
 
+  // Serve the service worker file
+  if (rawUrl === '/sw.js') {
+    const swCode = `
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', () => self.clients.claim());
+
+self.addEventListener('fetch', function(event) {
+  const url = event.request.url;
+  if (url.includes('verse.works')) {
+    const proxied = url
+      .replace('https://iframe.verse.works', '${PROXY_ORIGIN}')
+      .replace('https://verse.works', '${PROXY_ORIGIN}');
+    const newRequest = new Request(proxied, {
+      method: event.request.method,
+      headers: event.request.headers,
+      body: event.request.method !== 'GET' && event.request.method !== 'HEAD'
+        ? event.request.body : undefined,
+      redirect: 'follow',
+      credentials: 'omit',
+      mode: 'cors',
+    });
+    event.respondWith(fetch(newRequest));
+  }
+});`
+    res.setHeader('Content-Type', 'application/javascript')
+    res.setHeader('Service-Worker-Allowed', '/')
+    res.setHeader('Cache-Control', 'no-store')
+    res.status(200).send(swCode)
+    return
+  }
+
   // 1. Static JS/CSS — rewrite origin strings inside JS
   if (rawUrl.startsWith('/_next/static/')) {
     try {
@@ -120,22 +149,22 @@ export default async function handler(req, res) {
     return
   }
 
-  // 2. Next.js image optimisation — domain is whitelisted
+  // 2. Next.js image optimisation
   if (rawUrl.startsWith('/_next/image')) {
     return pipeRaw(`${VERSE_ORIGIN}${rawUrl}`)
   }
 
-  // 3. Next.js data routes — rewrite origins in JSON
+  // 3. Next.js data routes
   if (rawUrl.startsWith('/_next/data/')) {
     return pipeText(`${VERSE_ORIGIN}${rawUrl}`)
   }
 
-  // 4. /query and /graphql — GraphQL API on verse.works (GET or POST)
+  // 4. GraphQL / query endpoint on verse.works
   if (rawUrl.startsWith('/query') || rawUrl.startsWith('/graphql')) {
     return pipeRequest(`${VERSE_API_ORIGIN}${rawUrl}`)
   }
 
-  // 5. /api/ routes — try iframe origin first, these are Next.js API routes
+  // 5. Next.js API routes
   if (rawUrl.startsWith('/api/')) {
     return pipeRequest(`${VERSE_ORIGIN}${rawUrl}`)
   }
@@ -202,17 +231,27 @@ export default async function handler(req, res) {
       }
     )
 
-    // c) MutationObserver to survive React hydration
-    const darkGuard = `<script>
+    // c) MutationObserver + Service Worker registration
+    // The SW is served from /sw.js on the same origin, so it gets full scope.
+    // It intercepts all fetch() calls to *.verse.works before they leave the browser.
+    const headInject = `<script>
 (function(){
+  // Dark mode guard
   var h=document.documentElement;
   function d(){if(h.classList.contains('light')){h.classList.replace('light','dark');}else if(!h.classList.contains('dark')){h.classList.add('dark');}}
   d();
   new MutationObserver(function(){d();}).observe(h,{attributes:true,attributeFilter:['class']});
+
+  // Register service worker to intercept verse.works API calls
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js', { scope: '/' })
+      .then(function(reg) { console.log('[proxy] SW registered', reg.scope); })
+      .catch(function(err) { console.warn('[proxy] SW registration failed', err); });
+  }
 })();
 </script>`
 
-    html = html.replace('<head>', '<head>' + darkGuard)
+    html = html.replace('<head>', '<head>' + headInject)
 
     res.setHeader('Content-Type', 'text/html; charset=utf-8')
     res.setHeader('Access-Control-Allow-Origin', '*')
