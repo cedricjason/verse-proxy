@@ -1,16 +1,12 @@
 export default async function handler(req, res) {
   const VERSE_ORIGIN = 'https://iframe.verse.works'
+  const VERSE_API_ORIGIN = 'https://verse.works'
   const PROXY_ORIGIN = 'https://verse-33gallery.vercel.app'
 
-  function rewriteOrigin(text) {
-    // Cover all the ways the origin might appear in JS bundles
+  function rewriteOrigins(text) {
     return text
       .split(VERSE_ORIGIN).join(PROXY_ORIGIN)
-      .split('iframe.verse.works').join('verse-33gallery.vercel.app')
-      // Handle URL-encoded form
-      .split('iframe.verse%2Eworks').join('verse-33gallery.vercel.app')
-      // Handle escaped dots in regex literals inside the bundle
-      .split('iframe\\.verse\\.works').join('verse-33gallery\\.vercel\\.app')
+      .split(VERSE_API_ORIGIN).join(PROXY_ORIGIN)
   }
 
   const upstreamHeaders = () => ({
@@ -46,7 +42,7 @@ export default async function handler(req, res) {
       const upstream = await fetch(url, { headers: upstreamHeaders() })
       const ct = upstream.headers.get('content-type') || 'text/plain'
       let text = await upstream.text()
-      text = rewriteOrigin(text)
+      text = rewriteOrigins(text)
       res.setHeader('Content-Type', ct)
       res.setHeader('Access-Control-Allow-Origin', '*')
       res.setHeader('Cache-Control', 'no-store')
@@ -57,7 +53,49 @@ export default async function handler(req, res) {
     }
   }
 
+  // For POST/mutation requests (GraphQL) — forward body + method
+  async function pipeRequest(url) {
+    try {
+      const fetchOpts = {
+        method: req.method,
+        headers: {
+          ...upstreamHeaders(),
+          'Content-Type': req.headers['content-type'] || 'application/json',
+          'Origin': VERSE_ORIGIN,
+        },
+      }
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        // Read raw body
+        const chunks = []
+        for await (const chunk of req) chunks.push(chunk)
+        fetchOpts.body = Buffer.concat(chunks)
+      }
+      const upstream = await fetch(url, fetchOpts)
+      const ct = upstream.headers.get('content-type') || 'application/json'
+      let text = await upstream.text()
+      text = rewriteOrigins(text)
+      res.setHeader('Content-Type', ct)
+      res.setHeader('Access-Control-Allow-Origin', '*')
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+      res.setHeader('Cache-Control', 'no-store')
+      res.status(upstream.status).send(text)
+    } catch (err) {
+      console.error('[proxy] pipeRequest error:', url, err.message)
+      res.status(502).json({ error: err.message })
+    }
+  }
+
   const rawUrl = req.url
+
+  // CORS preflight
+  if (req.method === 'OPTIONS') {
+    res.setHeader('Access-Control-Allow-Origin', '*')
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+    res.status(204).end()
+    return
+  }
 
   // 1. Static JS/CSS — rewrite origin strings inside JS
   if (rawUrl.startsWith('/_next/static/')) {
@@ -69,7 +107,7 @@ export default async function handler(req, res) {
       res.setHeader('Cache-Control', 'public, max-age=3600')
       if (ct.includes('javascript') || ct.includes('json')) {
         let text = await upstream.text()
-        text = rewriteOrigin(text)
+        text = rewriteOrigins(text)
         res.status(upstream.status).send(text)
       } else {
         const buffer = await upstream.arrayBuffer()
@@ -82,38 +120,43 @@ export default async function handler(req, res) {
     return
   }
 
-  // 2. Next.js image optimisation — domain is whitelisted, pipe directly
+  // 2. Next.js image optimisation — domain is whitelisted
   if (rawUrl.startsWith('/_next/image')) {
     return pipeRaw(`${VERSE_ORIGIN}${rawUrl}`)
   }
 
-  // 3. Next.js data routes — rewrite origin in JSON
+  // 3. Next.js data routes — rewrite origins in JSON
   if (rawUrl.startsWith('/_next/data/')) {
     return pipeText(`${VERSE_ORIGIN}${rawUrl}`)
   }
 
-  // 4. API routes — rewrite origin in response
-  if (rawUrl.startsWith('/api/')) {
-    return pipeText(`${VERSE_ORIGIN}${rawUrl}`)
+  // 4. /query and /graphql — GraphQL API on verse.works (GET or POST)
+  if (rawUrl.startsWith('/query') || rawUrl.startsWith('/graphql')) {
+    return pipeRequest(`${VERSE_API_ORIGIN}${rawUrl}`)
   }
 
-  // 5. CDN helpers
+  // 5. /api/ routes — try iframe origin first, these are Next.js API routes
+  if (rawUrl.startsWith('/api/')) {
+    return pipeRequest(`${VERSE_ORIGIN}${rawUrl}`)
+  }
+
+  // 6. CDN helpers
   if (rawUrl.startsWith('/cdn-cgi/')) {
     return pipeRaw(`${VERSE_ORIGIN}${rawUrl}`)
   }
 
-  // 6. Static file extensions
+  // 7. Static file extensions
   const staticExt = /\.(woff2?|ttf|eot|otf|ico|png|jpe?g|gif|svg|webp|avif|mp4|webm|map)(\?|$)/i
   if (staticExt.test(rawUrl)) {
     return pipeRaw(`${VERSE_ORIGIN}${rawUrl}`)
   }
 
-  // 7. Favicon / manifest / robots
+  // 8. Favicon / manifest / robots
   if (rawUrl.startsWith('/favicon') || rawUrl.startsWith('/manifest') || rawUrl === '/robots.txt') {
     return pipeRaw(`${VERSE_ORIGIN}${rawUrl}`)
   }
 
-  // ─── 8. HTML page ─────────────────────────────────────────────────────────
+  // ─── 9. HTML page ──────────────────────────────────────────────────────────
   let parsedUrl
   try {
     parsedUrl = new URL(rawUrl, 'http://x')
@@ -146,7 +189,7 @@ export default async function handler(req, res) {
     let html = await response.text()
 
     // a) Rewrite all verse origin references
-    html = rewriteOrigin(html)
+    html = rewriteOrigins(html)
 
     // b) Swap light → dark
     html = html.replace(
@@ -169,32 +212,7 @@ export default async function handler(req, res) {
 })();
 </script>`
 
-    // d) Service Worker that intercepts any fetch to iframe.verse.works
-    //    and reroutes it through our proxy — catches anything the bundle
-    //    rewrite misses (split strings, env vars, etc.)
-    const swScript = `<script>
-if ('serviceWorker' in navigator) {
-  const swCode = \`
-self.addEventListener('fetch', function(event) {
-  const url = event.request.url;
-  if (url.includes('iframe.verse.works')) {
-    const proxied = url.replace('https://iframe.verse.works', '${PROXY_ORIGIN}');
-    event.respondWith(fetch(proxied, {
-      method: event.request.method,
-      headers: event.request.headers,
-      body: event.request.method !== 'GET' && event.request.method !== 'HEAD' ? event.request.body : undefined,
-      credentials: 'omit',
-    }));
-  }
-});
-\`;
-  const blob = new Blob([swCode], {type: 'application/javascript'});
-  const swUrl = URL.createObjectURL(blob);
-  navigator.serviceWorker.register(swUrl, {scope: '/'}).catch(function(){});
-}
-</script>`
-
-    html = html.replace('<head>', '<head>' + darkGuard + swScript)
+    html = html.replace('<head>', '<head>' + darkGuard)
 
     res.setHeader('Content-Type', 'text/html; charset=utf-8')
     res.setHeader('Access-Control-Allow-Origin', '*')
