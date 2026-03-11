@@ -245,33 +245,11 @@ self.addEventListener('fetch', function(event) {
   new MutationObserver(function(){d();}).observe(h,{attributes:true,attributeFilter:['class']});
 
   // Register SW — intercepts all verse.works Apollo/GraphQL calls
+  // No reload: SW will intercept from next navigation naturally
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.getRegistration('/').then(function(existing) {
-      // Unregister stale SW versions before registering fresh one
-      if (existing) {
-        existing.unregister().then(function() {
-          navigator.serviceWorker.register('/sw.js', { scope: '/' }).then(function(reg) {
-            console.log('[proxy] SW re-registered');
-            if (reg.installing) {
-              reg.installing.addEventListener('statechange', function() {
-                if (this.state === 'activated') window.location.reload();
-              });
-            } else {
-              window.location.reload();
-            }
-          });
-        });
-      } else {
-        navigator.serviceWorker.register('/sw.js', { scope: '/' }).then(function(reg) {
-          console.log('[proxy] SW registered');
-          if (reg.installing) {
-            reg.installing.addEventListener('statechange', function() {
-              if (this.state === 'activated') window.location.reload();
-            });
-          }
-        }).catch(function(err) { console.warn('[proxy] SW failed', err); });
-      }
-    });
+    navigator.serviceWorker.register('/sw.js', { scope: '/' })
+      .then(function(reg) { console.log('[proxy] SW registered', reg.scope); })
+      .catch(function(err) { console.warn('[proxy] SW failed', err); });
   }
 })();
 </script>`
