@@ -75,7 +75,7 @@ export default async function handler(req, res) {
       res.setHeader('Content-Type', ct)
       res.setHeader('Access-Control-Allow-Origin', '*')
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Apollo-Operation-Name, Apollo-Require-Preflight')
       res.setHeader('Cache-Control', 'no-store')
       res.status(upstream.status).send(text)
     } catch (err) {
@@ -90,12 +90,13 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') {
     res.setHeader('Access-Control-Allow-Origin', '*')
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Apollo-Operation-Name, Apollo-Require-Preflight')
     res.status(204).end()
     return
   }
 
-  // Serve the service worker file
+  // Serve the service worker — fixes the duplex/streaming body error by using
+  // arrayBuffer() instead of passing the request body as a stream
   if (rawUrl === '/sw.js') {
     const swCode = `
 self.addEventListener('install', () => self.skipWaiting());
@@ -103,21 +104,29 @@ self.addEventListener('activate', () => self.clients.claim());
 
 self.addEventListener('fetch', function(event) {
   const url = event.request.url;
-  if (url.includes('verse.works')) {
+  if (!url.includes('verse.works')) return;
+
+  event.respondWith((async function() {
     const proxied = url
       .replace('https://iframe.verse.works', '${PROXY_ORIGIN}')
       .replace('https://verse.works', '${PROXY_ORIGIN}');
-    const newRequest = new Request(proxied, {
+
+    const init = {
       method: event.request.method,
       headers: event.request.headers,
-      body: event.request.method !== 'GET' && event.request.method !== 'HEAD'
-        ? event.request.body : undefined,
-      redirect: 'follow',
-      credentials: 'omit',
       mode: 'cors',
-    });
-    event.respondWith(fetch(newRequest));
-  }
+      credentials: 'omit',
+      redirect: 'follow',
+    };
+
+    // For POST requests, read body as arrayBuffer (streaming not allowed in SW)
+    if (event.request.method !== 'GET' && event.request.method !== 'HEAD') {
+      init.body = await event.request.arrayBuffer();
+      init.duplex = 'half';
+    }
+
+    return fetch(proxied, init);
+  })());
 });`
     res.setHeader('Content-Type', 'application/javascript')
     res.setHeader('Service-Worker-Allowed', '/')
@@ -217,10 +226,8 @@ self.addEventListener('fetch', function(event) {
 
     let html = await response.text()
 
-    // a) Rewrite all verse origin references
     html = rewriteOrigins(html)
 
-    // b) Swap light → dark
     html = html.replace(
       /(<html[^>]*\sclass=")([\w\s-]*)"/,
       (match, prefix, classes) => {
@@ -231,9 +238,6 @@ self.addEventListener('fetch', function(event) {
       }
     )
 
-    // c) MutationObserver + Service Worker registration
-    // The SW is served from /sw.js on the same origin, so it gets full scope.
-    // It intercepts all fetch() calls to *.verse.works before they leave the browser.
     const headInject = `<script>
 (function(){
   // Dark mode guard
@@ -242,11 +246,19 @@ self.addEventListener('fetch', function(event) {
   d();
   new MutationObserver(function(){d();}).observe(h,{attributes:true,attributeFilter:['class']});
 
-  // Register service worker to intercept verse.works API calls
+  // Register SW to intercept verse.works Apollo GraphQL calls
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js', { scope: '/' })
-      .then(function(reg) { console.log('[proxy] SW registered', reg.scope); })
-      .catch(function(err) { console.warn('[proxy] SW registration failed', err); });
+      .then(function(reg) {
+        console.log('[proxy] SW registered', reg.scope);
+        // If SW is newly installed, reload so it can intercept immediately
+        if (reg.installing) {
+          reg.installing.addEventListener('statechange', function() {
+            if (this.state === 'activated') window.location.reload();
+          });
+        }
+      })
+      .catch(function(err) { console.warn('[proxy] SW failed', err); });
   }
 })();
 </script>`
