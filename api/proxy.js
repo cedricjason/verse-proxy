@@ -95,10 +95,9 @@ export default async function handler(req, res) {
     return
   }
 
-  // Serve the service worker — fixes the duplex/streaming body error by using
-  // arrayBuffer() instead of passing the request body as a stream
+  // Serve service worker — v3, avoids new Request() constructor entirely
   if (rawUrl === '/sw.js') {
-    const swCode = `
+    const swCode = `// v3
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', () => self.clients.claim());
 
@@ -111,21 +110,21 @@ self.addEventListener('fetch', function(event) {
       .replace('https://iframe.verse.works', '${PROXY_ORIGIN}')
       .replace('https://verse.works', '${PROXY_ORIGIN}');
 
-    const init = {
+    // Read body first for non-GET requests (streaming not allowed in SW fetch)
+    let body = undefined;
+    if (event.request.method !== 'GET' && event.request.method !== 'HEAD') {
+      body = await event.request.arrayBuffer();
+    }
+
+    // Pass proxied URL + init directly to fetch() — no new Request() constructor
+    return fetch(proxied, {
       method: event.request.method,
       headers: event.request.headers,
+      body: body,
       mode: 'cors',
       credentials: 'omit',
       redirect: 'follow',
-    };
-
-    // For POST requests, read body as arrayBuffer (streaming not allowed in SW)
-    if (event.request.method !== 'GET' && event.request.method !== 'HEAD') {
-      init.body = await event.request.arrayBuffer();
-      init.duplex = 'half';
-    }
-
-    return fetch(proxied, init);
+    });
   })());
 });`
     res.setHeader('Content-Type', 'application/javascript')
@@ -225,7 +224,6 @@ self.addEventListener('fetch', function(event) {
     }
 
     let html = await response.text()
-
     html = rewriteOrigins(html)
 
     html = html.replace(
@@ -246,19 +244,34 @@ self.addEventListener('fetch', function(event) {
   d();
   new MutationObserver(function(){d();}).observe(h,{attributes:true,attributeFilter:['class']});
 
-  // Register SW to intercept verse.works Apollo GraphQL calls
+  // Register SW — intercepts all verse.works Apollo/GraphQL calls
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/sw.js', { scope: '/' })
-      .then(function(reg) {
-        console.log('[proxy] SW registered', reg.scope);
-        // If SW is newly installed, reload so it can intercept immediately
-        if (reg.installing) {
-          reg.installing.addEventListener('statechange', function() {
-            if (this.state === 'activated') window.location.reload();
+    navigator.serviceWorker.getRegistration('/').then(function(existing) {
+      // Unregister stale SW versions before registering fresh one
+      if (existing) {
+        existing.unregister().then(function() {
+          navigator.serviceWorker.register('/sw.js', { scope: '/' }).then(function(reg) {
+            console.log('[proxy] SW re-registered');
+            if (reg.installing) {
+              reg.installing.addEventListener('statechange', function() {
+                if (this.state === 'activated') window.location.reload();
+              });
+            } else {
+              window.location.reload();
+            }
           });
-        }
-      })
-      .catch(function(err) { console.warn('[proxy] SW failed', err); });
+        });
+      } else {
+        navigator.serviceWorker.register('/sw.js', { scope: '/' }).then(function(reg) {
+          console.log('[proxy] SW registered');
+          if (reg.installing) {
+            reg.installing.addEventListener('statechange', function() {
+              if (this.state === 'activated') window.location.reload();
+            });
+          }
+        }).catch(function(err) { console.warn('[proxy] SW failed', err); });
+      }
+    });
   }
 })();
 </script>`
