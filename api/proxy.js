@@ -159,8 +159,8 @@ self.addEventListener('activate', () => {
     return pipeRaw(`${VERSE_ORIGIN}${rawUrl}`)
   }
 
-  // 6b. Static uploads (images, videos) served from verse.works directly
-  if (rawUrl.startsWith('/static/')) {
+  // 6b. Static uploads and image/video transformation endpoints on verse.works
+  if (rawUrl.startsWith('/static/') || rawUrl.startsWith('/image/')) {
     return pipeRaw(`${VERSE_API_ORIGIN}${rawUrl}`)
   }
 
