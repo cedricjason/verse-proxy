@@ -1,9 +1,16 @@
 export default async function handler(req, res) {
   const VERSE_ORIGIN = 'https://iframe.verse.works'
-  const PROXY_ORIGIN = 'https://verse-33gallery.vercel.app'  // ← updated domain
+  const PROXY_ORIGIN = 'https://verse-33gallery.vercel.app'
 
   function rewriteOrigin(text) {
-    return text.split(VERSE_ORIGIN).join(PROXY_ORIGIN)
+    // Cover all the ways the origin might appear in JS bundles
+    return text
+      .split(VERSE_ORIGIN).join(PROXY_ORIGIN)
+      .split('iframe.verse.works').join('verse-33gallery.vercel.app')
+      // Handle URL-encoded form
+      .split('iframe.verse%2Eworks').join('verse-33gallery.vercel.app')
+      // Handle escaped dots in regex literals inside the bundle
+      .split('iframe\\.verse\\.works').join('verse-33gallery\\.vercel\\.app')
   }
 
   const upstreamHeaders = () => ({
@@ -50,14 +57,9 @@ export default async function handler(req, res) {
     }
   }
 
-  // ─── Build the clean upstream path from the raw request URL ─────────────────
-  // req.url contains the full path+query as seen by the handler.
-  // We strip the Vercel rewrite injected "path" query param if present.
-  const rawUrl = req.url  // e.g. /_next/data/abc/33-gallery.json or /33-gallery?iframe=true
+  const rawUrl = req.url
 
-  // ─── Routing ─────────────────────────────────────────────────────────────────
-
-  // 1. Static JS / CSS — rewrite origin strings inside JS so fetch() stays on proxy
+  // 1. Static JS/CSS — rewrite origin strings inside JS
   if (rawUrl.startsWith('/_next/static/')) {
     try {
       const upstream = await fetch(`${VERSE_ORIGIN}${rawUrl}`, { headers: upstreamHeaders() })
@@ -80,12 +82,12 @@ export default async function handler(req, res) {
     return
   }
 
-  // 2. Next.js image optimisation — now that domain is whitelisted, pipe directly
+  // 2. Next.js image optimisation — domain is whitelisted, pipe directly
   if (rawUrl.startsWith('/_next/image')) {
     return pipeRaw(`${VERSE_ORIGIN}${rawUrl}`)
   }
 
-  // 3. Next.js data routes — rewrite origin in JSON response
+  // 3. Next.js data routes — rewrite origin in JSON
   if (rawUrl.startsWith('/_next/data/')) {
     return pipeText(`${VERSE_ORIGIN}${rawUrl}`)
   }
@@ -95,7 +97,7 @@ export default async function handler(req, res) {
     return pipeText(`${VERSE_ORIGIN}${rawUrl}`)
   }
 
-  // 5. CDN / cloudflare helpers
+  // 5. CDN helpers
   if (rawUrl.startsWith('/cdn-cgi/')) {
     return pipeRaw(`${VERSE_ORIGIN}${rawUrl}`)
   }
@@ -111,9 +113,7 @@ export default async function handler(req, res) {
     return pipeRaw(`${VERSE_ORIGIN}${rawUrl}`)
   }
 
-  // ─── 8. HTML page request ────────────────────────────────────────────────────
-  // Parse the path cleanly — ignore Vercel's injected "path" rewrite param
-  // by reconstructing the URL from what's actually in the raw request path.
+  // ─── 8. HTML page ─────────────────────────────────────────────────────────
   let parsedUrl
   try {
     parsedUrl = new URL(rawUrl, 'http://x')
@@ -122,11 +122,7 @@ export default async function handler(req, res) {
     return
   }
 
-  // The pathname is the gallery/artwork/artist path on Verse
-  // e.g. /33-gallery  or  /33-gallery/works/some-artwork
-  const versePath = parsedUrl.pathname  // already has leading slash
-
-  // Forward any query params except internal ones Vercel injects
+  const versePath = parsedUrl.pathname
   const forwardParams = new URLSearchParams()
   forwardParams.set('iframe', 'true')
   parsedUrl.searchParams.forEach((v, k) => {
@@ -156,17 +152,14 @@ export default async function handler(req, res) {
     html = html.replace(
       /(<html[^>]*\sclass=")([\w\s-]*)"/,
       (match, prefix, classes) => {
-        const updated = classes
-          .split(/\s+/)
-          .filter(Boolean)
-          .map(c => (c === 'light' ? 'dark' : c))
-          .join(' ')
+        const updated = classes.split(/\s+/).filter(Boolean)
+          .map(c => (c === 'light' ? 'dark' : c)).join(' ')
         const withDark = updated.includes('dark') ? updated : updated + ' dark'
         return `${prefix}${withDark}"`
       }
     )
 
-    // c) MutationObserver guard to survive React hydration resetting the class
+    // c) MutationObserver to survive React hydration
     const darkGuard = `<script>
 (function(){
   var h=document.documentElement;
@@ -175,7 +168,33 @@ export default async function handler(req, res) {
   new MutationObserver(function(){d();}).observe(h,{attributes:true,attributeFilter:['class']});
 })();
 </script>`
-    html = html.replace('<head>', '<head>' + darkGuard)
+
+    // d) Service Worker that intercepts any fetch to iframe.verse.works
+    //    and reroutes it through our proxy — catches anything the bundle
+    //    rewrite misses (split strings, env vars, etc.)
+    const swScript = `<script>
+if ('serviceWorker' in navigator) {
+  const swCode = \`
+self.addEventListener('fetch', function(event) {
+  const url = event.request.url;
+  if (url.includes('iframe.verse.works')) {
+    const proxied = url.replace('https://iframe.verse.works', '${PROXY_ORIGIN}');
+    event.respondWith(fetch(proxied, {
+      method: event.request.method,
+      headers: event.request.headers,
+      body: event.request.method !== 'GET' && event.request.method !== 'HEAD' ? event.request.body : undefined,
+      credentials: 'omit',
+    }));
+  }
+});
+\`;
+  const blob = new Blob([swCode], {type: 'application/javascript'});
+  const swUrl = URL.createObjectURL(blob);
+  navigator.serviceWorker.register(swUrl, {scope: '/'}).catch(function(){});
+}
+</script>`
+
+    html = html.replace('<head>', '<head>' + darkGuard + swScript)
 
     res.setHeader('Content-Type', 'text/html; charset=utf-8')
     res.setHeader('Access-Control-Allow-Origin', '*')
