@@ -95,37 +95,14 @@ export default async function handler(req, res) {
     return
   }
 
-  // Serve service worker — v3, avoids new Request() constructor entirely
+  // Unregister any previously installed service worker
   if (rawUrl === '/sw.js') {
-    const swCode = `// v3
+    // Return an empty SW that immediately unregisters itself
+    const swCode = `// uninstall
 self.addEventListener('install', () => self.skipWaiting());
-self.addEventListener('activate', () => self.clients.claim());
-
-self.addEventListener('fetch', function(event) {
-  const url = event.request.url;
-  if (!url.includes('verse.works')) return;
-
-  event.respondWith((async function() {
-    const proxied = url
-      .replace('https://iframe.verse.works', '${PROXY_ORIGIN}')
-      .replace('https://verse.works', '${PROXY_ORIGIN}');
-
-    // Read body first for non-GET requests (streaming not allowed in SW fetch)
-    let body = undefined;
-    if (event.request.method !== 'GET' && event.request.method !== 'HEAD') {
-      body = await event.request.arrayBuffer();
-    }
-
-    // Pass proxied URL + init directly to fetch() — no new Request() constructor
-    return fetch(proxied, {
-      method: event.request.method,
-      headers: event.request.headers,
-      body: body,
-      mode: 'cors',
-      credentials: 'omit',
-      redirect: 'follow',
-    });
-  })());
+self.addEventListener('activate', () => {
+  self.registration.unregister();
+  self.clients.matchAll().then(clients => clients.forEach(c => c.navigate(c.url)));
 });`
     res.setHeader('Content-Type', 'application/javascript')
     res.setHeader('Service-Worker-Allowed', '/')
@@ -248,8 +225,7 @@ self.addEventListener('fetch', function(event) {
   // No reload: SW will intercept from next navigation naturally
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js', { scope: '/' })
-      .then(function(reg) { console.log('[proxy] SW registered', reg.scope); })
-      .catch(function(err) { console.warn('[proxy] SW failed', err); });
+      .catch(function() {});
   }
 })();
 </script>`
